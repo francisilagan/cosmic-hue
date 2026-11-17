@@ -35,6 +35,8 @@ pub struct HueApplet {
     host: String,
     pair_state: String,
     pair_message: String,
+    /// The id of the running pair.discover, pair.start or pair.importOpenhue command.
+    pair_cmd: Option<u64>,
     discovered: Vec<String>,
     notice: Option<String>,
 }
@@ -68,16 +70,27 @@ pub enum Message {
 }
 
 impl HueApplet {
-    fn send(&mut self, cmd: &str, mut fields: Value) {
+    /// Send a command; returns its id, or None when the backend is not running.
+    fn send(&mut self, cmd: &str, mut fields: Value) -> Option<u64> {
         let Some(tx) = &self.tx else {
             self.notice = Some("The backend is not running.".into());
-            return;
+            return None;
         };
         self.next_id += 1;
         fields["id"] = json!(self.next_id);
         fields["cmd"] = json!(cmd);
         if tx.send(fields.to_string()).is_err() {
             self.tx = None;
+            return None;
+        }
+        Some(self.next_id)
+    }
+
+    /// Send a pairing command and show `status` until its result arrives.
+    fn send_pair(&mut self, cmd: &str, fields: Value, status: &str) {
+        self.pair_cmd = self.send(cmd, fields);
+        if self.pair_cmd.is_some() {
+            self.pair_message = status.to_string();
         }
     }
 
@@ -109,7 +122,10 @@ impl HueApplet {
                     ("waiting_button", None) => "Press the round link button on the bridge.".into(),
                     ("paired", _) => "Paired.".into(),
                     ("cancelled", _) => "Pairing cancelled.".into(),
-                    _ => v["message"].as_str().unwrap_or("Pairing failed.").to_string(),
+                    _ => v["message"]
+                        .as_str()
+                        .unwrap_or("Pairing failed.")
+                        .to_string(),
                 };
             }
             "discovered" => {
@@ -119,10 +135,20 @@ impl HueApplet {
                     .flatten()
                     .filter_map(|b| b["host"].as_str().map(str::to_string))
                     .collect();
-                if self.discovered.is_empty() {
-                    self.pair_message = "No bridge found. Type the address of the bridge.".into();
-                } else if self.host.is_empty() {
-                    self.host = self.discovered[0].clone();
+                self.pair_message = match self.discovered.as_slice() {
+                    [] => "No bridge found. Type the address of the bridge.".into(),
+                    [one] => format!("Found a bridge at {one}. Click Pair."),
+                    many => format!("Found {} bridges. Click one, then click Pair.", many.len()),
+                };
+                if !self.discovered.contains(&self.host) {
+                    self.host = self.discovered.first().cloned().unwrap_or_default();
+                }
+            }
+            "result" if self.pair_cmd.is_some() && v["id"].as_u64() == self.pair_cmd => {
+                self.pair_cmd = None;
+                if v["ok"] == json!(false) {
+                    let message = v["message"].as_str().unwrap_or("it failed");
+                    self.pair_message = format!("That did not work: {message}.");
                 }
             }
             "result" if v["ok"] == json!(false) => {
@@ -142,7 +168,10 @@ impl HueApplet {
         if let Some(s) = &mut self.snapshot {
             s.assume_group_on(&grouped_light, on);
         }
-        self.send("set", json!({"kind": "group", "ids": [grouped_light], "on": on}));
+        self.send(
+            "set",
+            json!({"kind": "group", "ids": [grouped_light], "on": on}),
+        );
     }
 
     /// A fresh popup action. It must be built per click: libcosmic takes sole
@@ -182,14 +211,19 @@ impl HueApplet {
 
     fn popup_view(&self) -> Element<'_, Message> {
         let space = theme::spacing();
-        let mut col = widget::Column::new().spacing(space.space_xs).padding([space.space_xs, 0]);
+        let mut col = widget::Column::new()
+            .spacing(space.space_xs)
+            .padding([space.space_xs, 0]);
 
         col = col.push(self.header());
         if let Some(notice) = &self.notice {
             col = col.push(
                 widget::Row::new()
                     .push(text::caption(notice.clone()).width(Length::Fill))
-                    .push(button::icon(icon::from_name("window-close-symbolic")).on_press(Message::DismissNotice))
+                    .push(
+                        button::icon(icon::from_name("window-close-symbolic"))
+                            .on_press(Message::DismissNotice),
+                    )
                     .align_y(Alignment::Center)
                     .padding([0, space.space_s]),
             );
@@ -243,13 +277,19 @@ impl HueApplet {
             .spacing(space.space_xs)
             .padding([0, space.space_s]);
         if let Some(s) = &self.snapshot
-            && s.home_group.is_some() {
-                row = row.push(toggler(s.any_on()).on_toggle(|_| Message::ToggleAll));
-            }
+            && s.home_group.is_some()
+        {
+            row = row.push(toggler(s.any_on()).on_toggle(|_| Message::ToggleAll));
+        }
         row.into()
     }
 
-    fn status_card<'a>(&'a self, title: &str, body: &str, action: Option<(&str, Message)>) -> Element<'a, Message> {
+    fn status_card<'a>(
+        &'a self,
+        title: &str,
+        body: &str,
+        action: Option<(&str, Message)>,
+    ) -> Element<'a, Message> {
         let space = theme::spacing();
         let mut col = widget::Column::new()
             .spacing(space.space_xs)
@@ -290,23 +330,34 @@ impl HueApplet {
             .padding([space.space_xs, space.space_s])
             .push(text::body("Pair with your Hue bridge"))
             .push(
-                widget::text_input("Bridge address, for example 192.168.1.2", self.host.as_str())
-                    .on_input(Message::Host)
-                    .on_submit(|_| Message::PairStart),
+                widget::text_input(
+                    "Bridge address, for example 192.168.1.2",
+                    self.host.as_str(),
+                )
+                .on_input(Message::Host)
+                .on_submit(|_| Message::PairStart),
             );
+        let busy = self.pair_cmd.is_some();
         let mut buttons = widget::Row::new().spacing(space.space_xs);
         if pairing {
             buttons = buttons.push(button::standard("Cancel").on_press(Message::PairCancel));
         } else {
             buttons = buttons
+                .push(button::suggested("Pair").on_press_maybe(
+                    (!busy && !self.host.trim().is_empty()).then_some(Message::PairStart),
+                ))
                 .push(
-                    button::suggested("Pair")
-                        .on_press_maybe((!self.host.trim().is_empty()).then_some(Message::PairStart)),
-                )
-                .push(button::standard("Find my bridge").on_press(Message::Discover))
-                .push(button::text("Use openhue login").on_press(Message::ImportOpenhue));
+                    button::standard("Find my bridge")
+                        .on_press_maybe((!busy).then_some(Message::Discover)),
+                );
         }
         col = col.push(buttons);
+        if !pairing {
+            col = col.push(
+                button::link("Use my openhue login")
+                    .on_press_maybe((!busy).then_some(Message::ImportOpenhue)),
+            );
+        }
         if !self.pair_message.is_empty() {
             col = col.push(text::caption(self.pair_message.clone()));
         }
@@ -316,7 +367,7 @@ impl HueApplet {
             }
         }
         col = col.push(text::caption(
-            "\"Find my bridge\" asks the Philips discovery service. After you press Pair, press the link button on the bridge within 40 seconds.",
+            "\"Find my bridge\" searches your local network. Only if it finds nothing there, it asks the Philips discovery service. After you click Pair, press the link button on the bridge within 40 seconds.",
         ));
         col.into()
     }
@@ -339,12 +390,20 @@ impl HueApplet {
         let space = theme::spacing();
         let expanded = self.expanded.contains(&g.id);
         let key = format!("g:{}", g.group);
-        let value = self.drag.get(&key).copied().unwrap_or_else(|| s.group_brightness(g));
+        let value = self
+            .drag
+            .get(&key)
+            .copied()
+            .unwrap_or_else(|| s.group_brightness(g));
         let gl = g.group.clone();
         let gl2 = g.group.clone();
         let gl3 = g.group.clone();
 
-        let chevron = if expanded { "go-down-symbolic" } else { "go-next-symbolic" };
+        let chevron = if expanded {
+            "go-down-symbolic"
+        } else {
+            "go-next-symbolic"
+        };
         let title = widget::Row::new()
             .push(
                 button::custom(
@@ -361,15 +420,23 @@ impl HueApplet {
             .push(toggler(g.on).on_toggle(move |on| Message::GroupOn(gl.clone(), on)))
             .align_y(Alignment::Center);
 
-        let mut col = widget::Column::new().push(title).padding([0, space.space_s]);
+        let mut col = widget::Column::new()
+            .push(title)
+            .padding([0, space.space_s]);
         if g.on {
             col = col.push(
-                widget::slider(1.0..=100.0, value.max(1.0), move |v| Message::GroupBrightness(gl2.clone(), v))
-                    .on_release(Message::GroupBrightnessDone(gl3)),
+                widget::slider(1.0..=100.0, value.max(1.0), move |v| {
+                    Message::GroupBrightness(gl2.clone(), v)
+                })
+                .on_release(Message::GroupBrightnessDone(gl3)),
             );
         }
         if expanded {
-            let scenes: Vec<_> = g.scene_ids.iter().filter_map(|id| s.scenes.get(id)).collect();
+            let scenes: Vec<_> = g
+                .scene_ids
+                .iter()
+                .filter_map(|id| s.scenes.get(id))
+                .collect();
             if !scenes.is_empty() {
                 let mut sorted = scenes;
                 sorted.sort_by_key(|sc| sc.name.to_lowercase());
@@ -404,13 +471,18 @@ impl HueApplet {
                 if !l.reachable {
                     name_row = name_row.push(text::caption("unreachable"));
                 }
-                name_row = name_row.push(toggler(l.on).on_toggle(move |on| Message::LightOn(id1.clone(), on)));
-                let mut lc = widget::Column::new().push(name_row).spacing(space.space_xxs);
+                name_row = name_row
+                    .push(toggler(l.on).on_toggle(move |on| Message::LightOn(id1.clone(), on)));
+                let mut lc = widget::Column::new()
+                    .push(name_row)
+                    .spacing(space.space_xxs);
                 if l.on && l.dimmable {
                     let v = self.drag.get(&key).copied().unwrap_or(l.brightness);
                     lc = lc.push(
-                        widget::slider(1.0..=100.0, v.max(1.0), move |v| Message::LightBrightness(id2.clone(), v))
-                            .on_release(Message::LightBrightnessDone(id3)),
+                        widget::slider(1.0..=100.0, v.max(1.0), move |v| {
+                            Message::LightBrightness(id2.clone(), v)
+                        })
+                        .on_release(Message::LightBrightnessDone(id3)),
                     );
                 }
                 lights = lights.add(lc);
@@ -468,20 +540,24 @@ fn parse_hex(hex: &str) -> Option<Color> {
 /// A small rounded square of one colour (a faint outline when there is none).
 fn swatch<'a>(hex: Option<&str>, size: f32) -> Element<'a, Message> {
     let fill = hex.and_then(parse_hex);
-    container(widget::Space::new().width(Length::Fixed(size)).height(Length::Fixed(size)))
-        .class(theme::Container::custom(move |t| {
-            let outline = t.cosmic().palette.neutral_5;
-            container::Style {
-                background: fill.map(Into::into),
-                border: cosmic::iced::Border {
-                    radius: (size / 4.0).into(),
-                    width: if fill.is_some() { 0.0 } else { 1.0 },
-                    color: outline.into(),
-                },
-                ..Default::default()
-            }
-        }))
-        .into()
+    container(
+        widget::Space::new()
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size)),
+    )
+    .class(theme::Container::custom(move |t| {
+        let outline = t.cosmic().palette.neutral_5;
+        container::Style {
+            background: fill.map(Into::into),
+            border: cosmic::iced::Border {
+                radius: (size / 4.0).into(),
+                width: if fill.is_some() { 0.0 } else { 1.0 },
+                color: outline.into(),
+            },
+            ..Default::default()
+        }
+    }))
+    .into()
 }
 
 impl cosmic::Application for HueApplet {
@@ -499,7 +575,13 @@ impl cosmic::Application for HueApplet {
     }
 
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
-        (Self { core, ..Default::default() }, Task::none())
+        (
+            Self {
+                core,
+                ..Default::default()
+            },
+            Task::none(),
+        )
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
@@ -529,10 +611,11 @@ impl cosmic::Application for HueApplet {
             }
             Message::ToggleAll => {
                 if let Some(s) = &self.snapshot
-                    && let Some(home) = s.home_group.clone() {
-                        let on = !s.any_on();
-                        self.set_group(home, on);
-                    }
+                    && let Some(home) = s.home_group.clone()
+                {
+                    let on = !s.any_on();
+                    self.set_group(home, on);
+                }
             }
             Message::Refresh => {
                 self.notice = None;
@@ -559,9 +642,10 @@ impl cosmic::Application for HueApplet {
                             .collect();
                         for id in ids {
                             if let Some(l) = s.lights.get_mut(&id)
-                                && l.on {
-                                    l.brightness = pct;
-                                }
+                                && l.on
+                            {
+                                l.brightness = pct;
+                            }
                         }
                     }
                     self.send("set", json!({"kind": "group", "ids": [gl], "pct": pct}));
@@ -569,9 +653,10 @@ impl cosmic::Application for HueApplet {
             }
             Message::LightOn(id, on) => {
                 if let Some(s) = &mut self.snapshot
-                    && let Some(l) = s.lights.get_mut(&id) {
-                        l.on = on;
-                    }
+                    && let Some(l) = s.lights.get_mut(&id)
+                {
+                    l.on = on;
+                }
                 self.send("set", json!({"kind": "light", "ids": [id], "on": on}));
             }
             Message::LightBrightness(id, v) => {
@@ -586,23 +671,40 @@ impl cosmic::Application for HueApplet {
                     self.send("set", json!({"kind": "light", "ids": [id], "pct": pct}));
                 }
             }
-            Message::Scene(id) => self.send("scene.recall", json!({"id": id, "mode": "active"})),
+            Message::Scene(id) => {
+                self.send("scene.recall", json!({"id": id, "mode": "active"}));
+            }
             Message::Host(h) => self.host = h,
             Message::PairStart => {
                 let host = self.host.trim().to_string();
                 if !host.is_empty() {
-                    self.pair_message = "Starting…".into();
-                    self.send("pair.start", json!({"host": host}));
+                    self.send_pair("pair.start", json!({"host": host}), "Starting…");
                 }
             }
-            Message::PairCancel => self.send("pair.cancel", json!({})),
-            Message::Discover => {
-                self.pair_message = "Looking for bridges…".into();
-                self.send("pair.discover", json!({}));
+            Message::PairCancel => {
+                self.send("pair.cancel", json!({}));
             }
-            Message::ImportOpenhue => self.send("pair.importOpenhue", json!({})),
-            Message::Trust => self.send("pair.trust", json!({})),
-            Message::Forget => self.send("pair.forget", json!({})),
+            Message::Discover => {
+                self.discovered.clear();
+                self.send_pair(
+                    "pair.discover",
+                    json!({}),
+                    "Looking for bridges on your network…",
+                );
+            }
+            Message::ImportOpenhue => {
+                self.send_pair(
+                    "pair.importOpenhue",
+                    json!({}),
+                    "Reading the openhue config…",
+                );
+            }
+            Message::Trust => {
+                self.send("pair.trust", json!({}));
+            }
+            Message::Forget => {
+                self.send("pair.forget", json!({}));
+            }
             Message::WallpaperEnabled(on) => {
                 self.wallpaper.config.enabled = on;
                 self.send("wallpaper.config", json!({"enabled": on}));
@@ -611,7 +713,9 @@ impl cosmic::Application for HueApplet {
                 self.wallpaper.config.turn_on = on;
                 self.send("wallpaper.config", json!({"turnOn": on}));
             }
-            Message::WallpaperSync => self.send("wallpaper.sync", json!({})),
+            Message::WallpaperSync => {
+                self.send("wallpaper.sync", json!({}));
+            }
             Message::DismissNotice => self.notice = None,
         }
         Task::none()

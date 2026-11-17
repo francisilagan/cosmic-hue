@@ -35,7 +35,7 @@ Each command has the form `{"id": <int>, "cmd": "<name>", ...fields}`. The backe
 | `enable` | `rtype`, `id`, `enabled` | Sensors. |
 | `entertainment.stop` | `id` | |
 | `pair.importOpenhue` | | Uses the bridge and the key from the config of the `openhue` CLI. |
-| `pair.discover` | | Sends a request to `discovery.meethue.com`. This is a cloud call. Send it only when the user asks. |
+| `pair.discover` | | Searches the local network (mDNS, neighbour table, then a probe of each address). Only if no bridge answers, it sends a request to `discovery.meethue.com`, a cloud call. Send it only when the user asks. |
 | `pair.start` | `host` | Starts pairing with the link button. The backend sends `result` at once and sets `conn: pairing`. Then it sends `pair` events. The time window is about 40 s. |
 | `pair.cancel` | | |
 | `pair.trust` | | Accepts the new certificate of the bridge after a `cert_changed`. |

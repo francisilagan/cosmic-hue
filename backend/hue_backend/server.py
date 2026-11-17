@@ -55,7 +55,7 @@ class Server:
                  fingerprint_of: Callable[[str], str] = credentials.fetch_fingerprint,
                  client_factory: Callable[[credentials.Credentials], BridgeClient] = BridgeClient,
                  stream_factory: Callable[[credentials.Credentials], EventStream] = EventStream,
-                 discover: Callable[[], List[Dict[str, str]]] = pairing.discover_cloud,
+                 discover: Callable[[], List[Dict[str, str]]] = pairing.discover,
                  pair_flow: Callable[..., credentials.Credentials] = pairing.link_button,
                  wallpaper_factory: Callable[..., WallpaperSync] = WallpaperSync,
                  backoff_start: float = 1.0, backoff_cap: float = 30.0,

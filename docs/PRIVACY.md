@@ -6,11 +6,19 @@ It has no telemetry, analytics or accounts.
 ## What leaves your network
 
 Only one action can send data out. It occurs only when you ask for it.
-The command **"Find my bridge"** sends a request to `https://discovery.meethue.com`
-(the discovery service of Signify). This request shows your public IP address to Signify.
-The plugin does not make this request automatically.
-Pairing with "Use my openhue login" or with a typed IP address makes no cloud call.
-(`backend/hue_backend/pairing.py`, `discover_cloud`.)
+The command **"Find my bridge"** first searches your local network. It does these steps:
+
+1. It sends an mDNS query for Hue bridges (`_hue._tcp.local`) on the local network.
+2. It reads the neighbour table of the kernel (`/proc/net/arp`).
+3. It sends `GET /api/0/config` over HTTP to each local address that it found in step 1 or step 2.
+   A bridge answers with its id. This request has no key and no data about you.
+
+Only if no bridge answers on the local network, the command sends a request to
+`https://discovery.meethue.com` (the discovery service of Signify).
+This request shows your public IP address to Signify.
+The applet does not make these requests automatically.
+Pairing with "Use my openhue login" or with a typed IP address makes no discovery request.
+(`backend/hue_backend/pairing.py`, `discover`.)
 
 All other traffic goes to the address of your bridge. This traffic is HTTPS requests to
 the CLIP v2 API of the bridge and to its event stream.

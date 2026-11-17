@@ -118,7 +118,8 @@ impl Snapshot {
     pub fn sorted_groups(&self) -> Vec<&Group> {
         let mut groups: Vec<&Group> = self.groups.iter().collect();
         groups.sort_by(|a, b| {
-            (a.kind != "room", a.name.to_lowercase()).cmp(&(b.kind != "room", b.name.to_lowercase()))
+            (a.kind != "room", a.name.to_lowercase())
+                .cmp(&(b.kind != "room", b.name.to_lowercase()))
         });
         groups
     }
@@ -143,7 +144,10 @@ impl Snapshot {
             if g.group == grouped_light || self.home_group.as_deref() == Some(grouped_light) {
                 g.on = on;
             } else {
-                g.on = g.light_ids.iter().any(|id| self.lights.get(id).is_some_and(|l| l.on));
+                g.on = g
+                    .light_ids
+                    .iter()
+                    .any(|id| self.lights.get(id).is_some_and(|l| l.on));
             }
         }
     }
@@ -178,7 +182,10 @@ mod tests {
         let s = fixture();
         assert_eq!(s.home_group.as_deref(), Some("home"));
         assert_eq!(s.lights["l2"].hex.as_deref(), Some("#ff0000"));
-        assert!(s.lights["l1"].reachable, "missing fields take their defaults");
+        assert!(
+            s.lights["l1"].reachable,
+            "missing fields take their defaults"
+        );
         assert!(s.scenes["s1"].active);
     }
 
@@ -194,7 +201,11 @@ mod tests {
         let s = fixture();
         assert_eq!(s.group_brightness(&s.groups[1]), 40.0);
         assert_eq!(s.group_brightness(&s.groups[0]), 0.0);
-        assert_eq!(s.group_lights(&s.groups[1]).count(), 2, "unknown ids are skipped");
+        assert_eq!(
+            s.group_lights(&s.groups[1]).count(),
+            2,
+            "unknown ids are skipped"
+        );
     }
 
     #[test]

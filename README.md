@@ -45,11 +45,11 @@ To remove the applet, run `just uninstall`.
 
 Click the bulb in the panel. If no bridge is paired, the popup shows the pairing view:
 
-1. **Find my bridge**: the backend asks the discovery service of Philips for bridges on your network. This is the only cloud call. For details, read [docs/PRIVACY.md](docs/PRIVACY.md).
+1. **Find my bridge**: the backend searches your local network with mDNS and the neighbour table. Only if it finds no bridge there, it asks the discovery service of Philips. For details, read [docs/PRIVACY.md](docs/PRIVACY.md).
 2. Or type the address of the bridge.
 3. Click **Pair**. Then press the round link button on the bridge within about 40 seconds.
 
-**Use openhue login** copies the bridge and the key from the `openhue` CLI config (`~/.config/openhue/config.yaml`).
+**Use my openhue login** copies the bridge and the key from the `openhue` CLI config (`~/.config/openhue/config.yaml`).
 
 ## Use the applet
 
