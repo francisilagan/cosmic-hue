@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Hue Lights
+Comment=Control Philips Hue lights from the panel
+Type=Application
+Exec=cosmic-applet-hue
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Hue;Philips;Lights;
+Icon=io.github.francisilagan.CosmicHue-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+X-HostWaylandDisplay=true

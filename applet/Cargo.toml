@@ -1,0 +1,16 @@
+[package]
+name = "cosmic-applet-hue"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Philips Hue control for the COSMIC panel"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "rt", "macros", "time"] }
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+default-features = false
+features = ["applet", "applet-token", "tokio", "wayland", "dbus-config", "multi-window", "winit"]
