@@ -6,17 +6,16 @@ The applet is written in Rust with `libcosmic`, the official COSMIC toolkit. A s
 
 ## Features
 
-- Rooms and zones: turn a room on or off, and set its brightness.
-- Lights: open a room to turn each light on or off and to set its brightness.
-- Scenes: open a room and click a scene to recall it. The active scene is highlighted.
-- Colour and white: click the colour button of a room or a light. Pick a colour preset, or set the hue and saturation. On the White tab, pick a white preset or set the colour temperature from cool to warm.
-- All lights: the switch at the top turns every light on or off.
-- Effects: in the colour control of a light, the Effects tab starts an effect (for example candle, fire, or prism). It also starts a 30-minute sunrise or sunset.
-- Routines: open a room and click a routine (smart scene) to start or stop it.
-- Automations tab: turn the automations of the bridge on or off. Stop an entertainment area that is streaming.
-- Devices tab: see the accessories and the bridge, with battery, firmware update state, and sensor readings. Turn sensors such as motion sensing on or off.
-- Wallpaper sync: the backend sets the colour of your lights from the current COSMIC wallpaper.
+- Rooms and zones: turn a room on or off, and set its brightness. Open **Room settings** to rename it. For a zone, also select its lights or delete it. Make a new zone with **New zone** at the end of the Lights tab.
+- Lights: open a room to turn each light on or off and to set its brightness. The **⋯** button of a light shows its product, a **Flash** button to find it, **When power returns**, and rename.
+- Colour, white and effects: the colour button of a room or a light opens Colour, White and Effects tabs. A room effect goes to each light that supports it. A light can also run a 30-minute sunrise or sunset.
+- Scenes: recall a scene from its room. The **Scenes** tab recalls a scene as static or dynamic, sets the dynamic speed and "Start dynamic automatically", saves the current look again, renames and deletes a scene, and saves the current look of a room as a new scene.
+- Routines: start or stop a routine (smart scene) from its room or from the Scenes tab.
+- **Auto** tab: turn the automations of the bridge on or off. Stop an entertainment area that is streaming.
+- **Devices** tab: the bridge with **Forget this bridge**, and the accessories with online state, battery, firmware update state, and sensor readings. Turn sensors such as motion sensing on or off.
+- Wallpaper sync: the backend sets the colour of your lights from the current COSMIC wallpaper. Select the rooms to colour, or none for all rooms.
 - Live updates: changes from the Hue app or from switches show in the applet.
+- Delete and forget actions need a second click within 3 seconds.
 
 ## Requirements
 
@@ -92,10 +91,8 @@ This runs the Python backend tests and the Rust tests.
 
 These features of omarchy-hue are not in the COSMIC applet yet:
 
-- Scene and zone editing, renaming, and the power-up behaviour of a light.
+- Keyboard control in the popup.
 - Translations.
-
-The backend already supports all of them. Only the applet views are missing.
 
 ## License
 

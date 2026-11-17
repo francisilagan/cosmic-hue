@@ -12,6 +12,8 @@ use cosmic::{Element, theme};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
+mod manage;
+
 use crate::backend;
 use crate::colour;
 use crate::model::{Group, Snapshot, Wallpaper};
@@ -54,6 +56,7 @@ impl Target {
 pub enum Tab {
     #[default]
     Lights,
+    Scenes,
     Automations,
     Devices,
 }
@@ -132,6 +135,14 @@ pub struct HueApplet {
     tuner: Option<Target>,
     tuner_mode: TunerMode,
     tab: Tab,
+    /// Rename drafts keyed "rtype:id".
+    names: HashMap<String, String>,
+    /// A destructive action armed by its first click: (key, when).
+    confirm: Option<(String, std::time::Instant)>,
+    scene_name: String,
+    scene_group: Option<String>,
+    zone_name: String,
+    zone_lights: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +180,28 @@ pub enum Message {
     Automation(String, bool),
     EntertainmentStop(String),
     Enable(String, String, bool),
+    WallpaperTarget(String),
+    SceneRecall(String, String),
+    SceneSpeed(String, f32),
+    SceneSpeedDone(String),
+    SceneAutoDynamic(String, bool),
+    SceneResave(String),
+    SceneDelete(String),
+    SceneGroup(String),
+    SceneName(String),
+    SceneCreate,
+    RenameInput(String, String),
+    /// (rtype, id, current name)
+    RenameSubmit(String, String, String),
+    ZoneName(String),
+    ZoneLight(String),
+    ZoneCreate,
+    ZoneMember(String, String),
+    ZoneDelete(String),
+    GroupEffect(String, String),
+    Identify(String),
+    Powerup(String, String),
+    ForgetBridge,
     Hue(Target, f32),
     Saturation(Target, f32),
     ColourDone(Target),
@@ -354,7 +387,12 @@ impl HueApplet {
                         Message::Tab(Tab::Lights),
                     ))
                     .push(tab_button(
-                        "Automations",
+                        "Scenes",
+                        self.tab == Tab::Scenes,
+                        Message::Tab(Tab::Scenes),
+                    ))
+                    .push(tab_button(
+                        "Auto",
                         self.tab == Tab::Automations,
                         Message::Tab(Tab::Automations),
                     ))
@@ -382,14 +420,11 @@ impl HueApplet {
                     Some(("Pair again", Message::Forget)),
                 ),
                 "cert_changed" => self.cert_view(),
-                "unreachable" if self.snapshot.is_none() => self.status_card(
-                    "The bridge is unreachable.",
-                    "Make sure the bridge has power and is on your network. The applet tries again.",
-                    Some(("Retry", Message::Refresh)),
-                ),
+                "unreachable" if self.snapshot.is_none() => self.recovery_view(),
                 _ => match &self.snapshot {
                     Some(s) => match self.tab {
                         Tab::Lights => self.lights_view(s),
+                        Tab::Scenes => self.scenes_view(s),
                         Tab::Automations => self.automations_view(s),
                         Tab::Devices => self.devices_view(s),
                     },
@@ -523,7 +558,9 @@ impl HueApplet {
             col = col.push(self.group_view(s, g));
         }
         col = col.push(divider::horizontal::default());
-        col = col.push(self.wallpaper_view());
+        col = col.push(self.new_zone_view(s));
+        col = col.push(divider::horizontal::default());
+        col = col.push(self.wallpaper_view(s));
         col.into()
     }
 
@@ -603,7 +640,8 @@ impl HueApplet {
         let space = theme::spacing();
         let col = widget::Column::new()
             .spacing(space.space_xs)
-            .padding([space.space_xs, space.space_s]);
+            .padding([space.space_xs, space.space_s])
+            .push(self.bridge_card(s));
         if s.devices.is_empty() {
             return col
                 .push(text::caption("The bridge reports no accessories."))
@@ -615,7 +653,12 @@ impl HueApplet {
                 .push(text::body(d.name.clone()).width(Length::Fill))
                 .spacing(space.space_xxs)
                 .align_y(Alignment::Center);
-            if let Some(b) = d.battery {
+            if !d.reachable {
+                title = title.push(text::caption("offline"));
+            } else if d.battery.is_none() {
+                title = title.push(text::caption("online"));
+            }
+            if let Some(b) = d.battery.filter(|_| d.reachable) {
                 let name = match b as u32 {
                     0..=10 => "battery-level-10-symbolic",
                     11..=30 => "battery-level-30-symbolic",
@@ -625,7 +668,11 @@ impl HueApplet {
                 };
                 title = title
                     .push(icon::from_name(name).size(16))
-                    .push(text::caption(format!("{}%", b.round())));
+                    .push(text::caption(if b <= 15.0 {
+                        format!("{}% · low", b.round())
+                    } else {
+                        format!("{}%", b.round())
+                    }));
             }
             let mut detail = vec![];
             if d.bridge {
@@ -701,6 +748,7 @@ impl HueApplet {
                     widget::Row::new()
                         .push(icon::from_name(chevron).size(16))
                         .push(text::body(g.name.clone()))
+                        .push_maybe((g.kind == "zone").then(|| text::caption("zone")))
                         .spacing(space.space_xxs)
                         .align_y(Alignment::Center),
                 )
@@ -799,9 +847,20 @@ impl HueApplet {
                 if !l.reachable {
                     name_row = name_row.push(text::caption("unreachable"));
                 }
+                if let Some(effect) = manage::running_effect(l) {
+                    name_row = name_row.push(text::caption(effect));
+                }
                 if l.on {
                     name_row = name_row.push_maybe(self.tuner_button(s, &target));
                 }
+                let more_key = format!("more:l:{}", l.id);
+                let more_open = self.expanded.contains(&more_key);
+                name_row = name_row.push(
+                    button::icon(icon::from_name("view-more-symbolic"))
+                        .tooltip("Light settings")
+                        .selected(more_open)
+                        .on_press(Message::Expand(more_key)),
+                );
                 name_row = name_row
                     .push(toggler(l.on).on_toggle(move |on| Message::LightOn(id1.clone(), on)));
                 let mut lc = widget::Column::new()
@@ -819,9 +878,23 @@ impl HueApplet {
                 if l.on && self.tuner.as_ref() == Some(&target) {
                     lc = lc.push(self.tuner_view(s, &target));
                 }
+                if more_open {
+                    lc = lc.push(self.light_settings(l));
+                }
                 lights = lights.add(lc);
             }
             col = col.push(lights);
+            let key = format!("more:g:{}", g.id);
+            let open = self.expanded.contains(&key);
+            let label = match (open, g.kind.as_str()) {
+                (true, _) => "Hide settings",
+                (false, "zone") => "Zone settings",
+                (false, _) => "Room settings",
+            };
+            col = col.push(button::link(label).on_press(Message::Expand(key)));
+            if open {
+                col = col.push(self.group_settings(s, g));
+            }
         }
         col.into()
     }
@@ -842,7 +915,10 @@ impl HueApplet {
             Target::Group(_) => None,
         };
         TunerInfo {
-            effects: single.map(|l| l.effects.clone()).unwrap_or_default(),
+            effects: match target {
+                Target::Light(_) => single.map(|l| l.effects.clone()).unwrap_or_default(),
+                Target::Group(_) => manage::group_effects(lights.iter().copied()),
+            },
             effect: single.map(|l| l.effect.clone()).unwrap_or_default(),
             timed: single.map(|l| l.timed_effects.clone()).unwrap_or_default(),
             timed_effect: single.map(|l| l.timed_effect.clone()).unwrap_or_default(),
@@ -931,6 +1007,24 @@ impl HueApplet {
         }
 
         if mode == TunerMode::Effects {
+            if let Target::Group(gl) = target {
+                let chips: Vec<Element<'a, Message>> = std::iter::once("no_effect".to_string())
+                    .chain(info.effects.iter().cloned())
+                    .map(|e| {
+                        button::standard(effect_label(&e))
+                            .on_press(Message::GroupEffect(gl.clone(), e))
+                            .into()
+                    })
+                    .collect();
+                return col
+                    .push(text::caption("Effects (on the lights that support them)"))
+                    .push(
+                        widget::flex_row(chips)
+                            .row_spacing(space.space_xxs)
+                            .column_spacing(space.space_xxs),
+                    )
+                    .into();
+            }
             let Target::Light(light) = target else {
                 return col.into();
             };
@@ -1093,41 +1187,6 @@ impl HueApplet {
             cmd["mirek"] = json!(m.round() as i64);
         }
         self.send("set", cmd);
-    }
-
-    fn wallpaper_view(&self) -> Element<'_, Message> {
-        let space = theme::spacing();
-        let w = &self.wallpaper;
-        let mut swatches = widget::Row::new().spacing(space.space_xxs);
-        for hex in &w.palette {
-            swatches = swatches.push(swatch(Some(hex.as_str()), 18.0));
-        }
-        let status = if !w.config.enabled {
-            "Off. The palette below comes from your COSMIC wallpaper.".to_string()
-        } else if w.eligible == 0 {
-            "No colour light can be reached. Turn the lights on, or turn on \"Also switch lights on\".".to_string()
-        } else {
-            format!("{} colour lights follow the wallpaper.", w.eligible)
-        };
-        widget::Column::new()
-            .spacing(space.space_xxs)
-            .padding([space.space_xs, space.space_s])
-            .push(
-                widget::Row::new()
-                    .push(text::body("Wallpaper sync").width(Length::Fill))
-                    .push(toggler(w.config.enabled).on_toggle(Message::WallpaperEnabled))
-                    .align_y(Alignment::Center),
-            )
-            .push(text::caption(status))
-            .push(swatches)
-            .push(
-                widget::Row::new()
-                    .push(text::caption("Also switch lights on").width(Length::Fill))
-                    .push(toggler(w.config.turn_on).on_toggle(Message::WallpaperTurnOn))
-                    .align_y(Alignment::Center),
-            )
-            .push(button::standard("Sync now").on_press(Message::WallpaperSync))
-            .into()
     }
 }
 
@@ -1409,6 +1468,174 @@ impl cosmic::Application for HueApplet {
             }
             Message::EntertainmentStop(id) => {
                 self.send("entertainment.stop", json!({"id": id}));
+            }
+            Message::WallpaperTarget(id) => {
+                let mut targets = self.wallpaper.config.targets.clone();
+                if let Some(i) = targets.iter().position(|t| *t == id) {
+                    targets.remove(i);
+                } else {
+                    targets.push(id);
+                }
+                self.wallpaper.config.targets = targets.clone();
+                self.send("wallpaper.config", json!({"targets": targets}));
+            }
+            Message::SceneRecall(id, mode) => {
+                self.send("scene.recall", json!({"id": id, "mode": mode}));
+            }
+            Message::SceneSpeed(id, v) => {
+                self.drag.insert(format!("speed:{id}"), v);
+            }
+            Message::SceneSpeedDone(id) => {
+                if let Some(v) = self.drag.remove(&format!("speed:{id}")) {
+                    if let Some(sc) = self.snapshot.as_mut().and_then(|s| s.scenes.get_mut(&id)) {
+                        sc.speed = v;
+                    }
+                    self.send(
+                        "scene.update",
+                        json!({"id": id, "speed": (v * 100.0).round() / 100.0}),
+                    );
+                }
+            }
+            Message::SceneAutoDynamic(id, on) => {
+                if let Some(sc) = self.snapshot.as_mut().and_then(|s| s.scenes.get_mut(&id)) {
+                    sc.auto_dynamic = on;
+                }
+                self.send("scene.update", json!({"id": id, "autoDynamic": on}));
+            }
+            Message::SceneResave(id) => {
+                self.send("scene.update", json!({"id": id, "snapshot": true}));
+            }
+            Message::SceneDelete(id) => {
+                if self.confirmed(&format!("scene.delete:{id}")) {
+                    self.send("scene.delete", json!({"id": id}));
+                }
+            }
+            Message::SceneGroup(id) => self.scene_group = Some(id),
+            Message::SceneName(name) => self.scene_name = name,
+            Message::SceneCreate => {
+                let name = self.scene_name.trim().to_string();
+                let group = self.scene_group.clone().or_else(|| {
+                    self.snapshot
+                        .as_ref()
+                        .and_then(|s| s.sorted_groups().first().map(|g| g.id.clone()))
+                });
+                if let (false, Some(group)) = (name.is_empty(), group) {
+                    self.send("scene.create", json!({"name": name, "group": group}));
+                    self.scene_name.clear();
+                }
+            }
+            Message::RenameInput(key, text) => {
+                self.names.insert(key, text);
+            }
+            Message::RenameSubmit(rtype, id, current) => {
+                let key = format!("{rtype}:{id}");
+                let name = self
+                    .names
+                    .get(&key)
+                    .map(|n| n.trim().to_string())
+                    .unwrap_or_default();
+                if !name.is_empty() && name != current {
+                    self.send("rename", json!({"rtype": rtype, "id": id, "name": name}));
+                    self.names.remove(&key);
+                }
+            }
+            Message::ZoneName(name) => self.zone_name = name,
+            Message::ZoneLight(id) => {
+                if !self.zone_lights.remove(&id) {
+                    self.zone_lights.insert(id);
+                }
+            }
+            Message::ZoneCreate => {
+                let name = self.zone_name.trim().to_string();
+                if !name.is_empty() && !self.zone_lights.is_empty() {
+                    let lights: Vec<String> = self.zone_lights.drain().collect();
+                    self.send("zone.create", json!({"name": name, "lights": lights}));
+                    self.zone_name.clear();
+                    self.expanded.remove("newzone");
+                }
+            }
+            Message::ZoneMember(zone, light) => {
+                let members = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.groups.iter().find(|g| g.id == zone))
+                    .map(|g| {
+                        let mut m = g.light_ids.clone();
+                        if let Some(i) = m.iter().position(|l| *l == light) {
+                            m.remove(i);
+                        } else {
+                            m.push(light.clone());
+                        }
+                        m
+                    });
+                match members {
+                    Some(m) if m.is_empty() => {
+                        self.notice = Some(
+                            "A zone needs at least one light. Delete the zone instead.".into(),
+                        );
+                    }
+                    Some(m) => {
+                        if let Some(g) = self
+                            .snapshot
+                            .as_mut()
+                            .and_then(|s| s.groups.iter_mut().find(|g| g.id == zone))
+                        {
+                            g.light_ids = m.clone();
+                        }
+                        self.send("zone.members", json!({"id": zone, "lights": m}));
+                    }
+                    None => {}
+                }
+            }
+            Message::ZoneDelete(id) => {
+                if self.confirmed(&format!("zone.delete:{id}")) {
+                    self.send("zone.delete", json!({"id": id}));
+                }
+            }
+            Message::GroupEffect(gl, effect) => {
+                let targets: Vec<String> = self
+                    .snapshot
+                    .as_ref()
+                    .map(|s| {
+                        s.lights_of(&gl)
+                            .into_iter()
+                            .filter(|id| {
+                                s.lights.get(id).is_some_and(|l| {
+                                    l.on && !l.effects.is_empty()
+                                        && (effect == "no_effect" || l.effects.contains(&effect))
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for id in targets {
+                    if let Some(l) = self.snapshot.as_mut().and_then(|s| s.lights.get_mut(&id)) {
+                        l.effect = effect.clone();
+                    }
+                    self.send(
+                        "set",
+                        json!({"kind": "light", "ids": [id], "effect": effect}),
+                    );
+                }
+            }
+            Message::Identify(id) => {
+                self.send(
+                    "set",
+                    json!({"kind": "light", "ids": [id], "identify": true}),
+                );
+            }
+            Message::Powerup(id, preset) => {
+                if let Some(l) = self.snapshot.as_mut().and_then(|s| s.lights.get_mut(&id)) {
+                    l.powerup = Some(preset.clone());
+                }
+                self.send("powerup", json!({"id": id, "preset": preset}));
+            }
+            Message::ForgetBridge => {
+                if self.confirmed("forget") {
+                    self.snapshot = None;
+                    self.tab = Tab::Lights;
+                    self.send("pair.forget", json!({}));
+                }
             }
             Message::Enable(rtype, id, enabled) => {
                 if let Some(c) = self.snapshot.as_mut().and_then(|s| {

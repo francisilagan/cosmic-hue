@@ -146,6 +146,9 @@ pub struct Light {
     pub timed_effects: Vec<String>,
     #[serde(rename = "timedEffect")]
     pub timed_effect: String,
+    pub product: String,
+    /// "safety", "powerfail", "last_on_state" or another preset; None when not supported.
+    pub powerup: Option<String>,
 }
 
 impl Default for Light {
@@ -167,6 +170,8 @@ impl Default for Light {
             effect: "no_effect".into(),
             timed_effects: Vec::new(),
             timed_effect: "no_effect".into(),
+            product: String::new(),
+            powerup: None,
         }
     }
 }
@@ -178,6 +183,13 @@ pub struct Scene {
     pub name: String,
     pub group: String,
     pub active: bool,
+    /// "inactive", "static" or "dynamic_palette".
+    pub mode: String,
+    pub speed: f32,
+    #[serde(rename = "autoDynamic")]
+    pub auto_dynamic: bool,
+    /// The scene has a palette, so it can play dynamically.
+    pub dynamic: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -196,6 +208,9 @@ pub struct Wallpaper {
     pub palette: Vec<String>,
     #[serde(rename = "appliedCount")]
     pub applied_count: u32,
+    /// Epoch seconds of the last apply.
+    #[serde(rename = "appliedAt")]
+    pub applied_at: Option<f64>,
     pub eligible: u32,
 }
 
@@ -406,6 +421,32 @@ mod tests {
         assert_eq!(d.readings.len(), 2, "a reading without a label is dropped");
         assert_eq!(d.readings[1].value, "120", "a number value becomes text");
         assert_eq!(d.controls[0].rtype, "motion");
+    }
+
+    #[test]
+    fn scene_light_and_wallpaper_details_parse() {
+        let s: Snapshot = serde_json::from_value(serde_json::json!({
+            "lights": {"l": {"id": "l", "product": "Hue Play", "powerup": "safety"}},
+            "scenes": {"s": {"id": "s", "name": "Relax", "group": "r", "active": true,
+                             "mode": "dynamic_palette", "speed": 0.4, "autoDynamic": true, "dynamic": true}}
+        }))
+        .unwrap();
+        assert_eq!(s.lights["l"].powerup.as_deref(), Some("safety"));
+        let sc = &s.scenes["s"];
+        assert_eq!(
+            (sc.mode.as_str(), sc.auto_dynamic, sc.dynamic),
+            ("dynamic_palette", true, true)
+        );
+        assert!((sc.speed - 0.4).abs() < 1e-6);
+        let w: Wallpaper = serde_json::from_value(serde_json::json!({
+            "config": {"enabled": true, "targets": ["r"]}, "appliedAt": 1700000000.5, "appliedCount": 3
+        }))
+        .unwrap();
+        assert_eq!(w.applied_at, Some(1700000000.5));
+        assert_eq!(w.config.targets, ["r"]);
+        let none: Wallpaper =
+            serde_json::from_value(serde_json::json!({"appliedAt": null})).unwrap();
+        assert_eq!(none.applied_at, None);
     }
 
     #[test]
