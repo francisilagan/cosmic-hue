@@ -17,7 +17,8 @@ use crate::colour;
 use crate::model::{Group, Snapshot, Wallpaper};
 
 pub const APP_ID: &str = "io.github.francisilagan.CosmicHue";
-const BULB_ICON: &[u8] = include_bytes!("../res/icons/cosmic-hue-symbolic.svg");
+/// Set by build.rs: the local override icon if there is one, else the bundled one.
+const BULB_ICON: &[u8] = include_bytes!(env!("COSMIC_HUE_ICON"));
 
 /// What a colour control acts on: a light id, or a grouped_light id.
 #[derive(Debug, Clone, PartialEq, Eq)]

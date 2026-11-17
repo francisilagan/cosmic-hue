@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .mypy_cache/
 applet/target/
+
+# Local-only icon override (for example a trademarked logo). Never commit.
+applet/res/icons/local/

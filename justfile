@@ -22,7 +22,7 @@ install: build
     sed 's|^Exec=.*|Exec={{bin}}|' applet/res/{{appid}}.desktop > /tmp/{{appid}}.desktop
     install -Dm0644 /tmp/{{appid}}.desktop {{share}}/applications/{{appid}}.desktop
     rm -f /tmp/{{appid}}.desktop
-    install -Dm0644 applet/res/icons/cosmic-hue-symbolic.svg {{share}}/icons/hicolor/scalable/apps/{{appid}}-symbolic.svg
+    icon=applet/res/icons/local/cosmic-hue-symbolic.svg; [ -f "$icon" ] || icon=applet/res/icons/cosmic-hue-symbolic.svg; install -Dm0644 "$icon" {{share}}/icons/hicolor/scalable/apps/{{appid}}-symbolic.svg
     rm -rf {{share}}/cosmic-hue/backend
     mkdir -p {{share}}/cosmic-hue
     cp -r backend {{share}}/cosmic-hue/backend
