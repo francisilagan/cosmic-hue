@@ -48,8 +48,46 @@ impl Target {
     }
 }
 
+/// The tabs of the popup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Tab {
+    #[default]
+    Lights,
+    Automations,
+    Devices,
+}
+
+/// The tabs of a colour control.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TunerMode {
+    #[default]
+    Colour,
+    White,
+    Effects,
+}
+
+/// How long a sunrise or sunset runs.
+const TIMED_EFFECT_MS: u64 = 30 * 60 * 1000;
+
+/// "underwater" -> "Underwater", "no_effect" -> "None".
+fn effect_label(id: &str) -> String {
+    if id == "no_effect" {
+        return "None".into();
+    }
+    let words = id.replace('_', " ");
+    let mut c = words.chars();
+    c.next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default()
+}
+
 /// What the colour control of a target can do, and what it shows now.
 struct TunerInfo {
+    /// Effects and timed effects apply to one light only.
+    effects: Vec<String>,
+    effect: String,
+    timed: Vec<String>,
+    timed_effect: String,
     color: bool,
     ct: bool,
     mirek_min: f32,
@@ -91,7 +129,8 @@ pub struct HueApplet {
     notice: Option<String>,
     /// The open colour control (one at a time) and whether it shows whites.
     tuner: Option<Target>,
-    tuner_white: bool,
+    tuner_mode: TunerMode,
+    tab: Tab,
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +160,14 @@ pub enum Message {
     WallpaperSync,
     DismissNotice,
     ToggleTuner(Target),
-    TunerWhite(bool),
+    TunerMode(TunerMode),
+    Tab(Tab),
+    Effect(String, String),
+    TimedEffect(String, String),
+    SmartScene(String, bool),
+    Automation(String, bool),
+    EntertainmentStop(String),
+    Enable(String, String, bool),
     Hue(Target, f32),
     Saturation(Target, f32),
     ColourDone(Target),
@@ -290,6 +336,34 @@ impl HueApplet {
                     .padding([0, space.space_s]),
             );
         }
+        let main = self.backend_down.is_none()
+            && self.snapshot.is_some()
+            && !matches!(
+                self.conn.as_str(),
+                "unpaired" | "pairing" | "unauthorized" | "cert_changed"
+            );
+        if main {
+            col = col.push(
+                widget::Row::new()
+                    .spacing(space.space_xxs)
+                    .padding([0, space.space_s])
+                    .push(tab_button(
+                        "Lights",
+                        self.tab == Tab::Lights,
+                        Message::Tab(Tab::Lights),
+                    ))
+                    .push(tab_button(
+                        "Automations",
+                        self.tab == Tab::Automations,
+                        Message::Tab(Tab::Automations),
+                    ))
+                    .push(tab_button(
+                        "Devices",
+                        self.tab == Tab::Devices,
+                        Message::Tab(Tab::Devices),
+                    )),
+            );
+        }
         col = col.push(divider::horizontal::default());
 
         let body: Element<'_, Message> = if let Some(reason) = &self.backend_down {
@@ -313,7 +387,11 @@ impl HueApplet {
                     Some(("Retry", Message::Refresh)),
                 ),
                 _ => match &self.snapshot {
-                    Some(s) => self.lights_view(s),
+                    Some(s) => match self.tab {
+                        Tab::Lights => self.lights_view(s),
+                        Tab::Automations => self.automations_view(s),
+                        Tab::Devices => self.devices_view(s),
+                    },
                     None => self.status_card("Connecting to the bridge…", "", None),
                 },
             }
@@ -448,6 +526,156 @@ impl HueApplet {
         col.into()
     }
 
+    fn automations_view<'a>(&'a self, s: &'a Snapshot) -> Element<'a, Message> {
+        let space = theme::spacing();
+        let mut col = widget::Column::new()
+            .spacing(space.space_xs)
+            .padding([space.space_xs, space.space_s]);
+        col = col.push(text::heading("Automations"));
+        if s.automations.is_empty() {
+            col = col.push(text::caption(
+                "The bridge has no automations. Make them in the Hue app.",
+            ));
+        } else {
+            let mut list: Vec<_> = s.automations.iter().collect();
+            list.sort_by_key(|a| a.name.to_lowercase());
+            let mut section = settings::section();
+            for a in list {
+                let id = a.id.clone();
+                let mut info = widget::Column::new().push(text::body(a.name.clone()));
+                let detail = match (a.script.is_empty(), a.status.as_str()) {
+                    (true, "") => String::new(),
+                    (true, st) => effect_label(st),
+                    (false, "") => a.script.clone(),
+                    (false, st) => format!("{} · {}", a.script, effect_label(st)),
+                };
+                if !detail.is_empty() {
+                    info = info.push(text::caption(detail));
+                }
+                section = section.add(
+                    widget::Row::new()
+                        .push(info.width(Length::Fill))
+                        .push(
+                            toggler(a.enabled)
+                                .on_toggle(move |on| Message::Automation(id.clone(), on)),
+                        )
+                        .align_y(Alignment::Center),
+                );
+            }
+            col = col.push(section);
+        }
+        col = col.push(text::heading("Entertainment areas"));
+        if s.entertainment.is_empty() {
+            col = col.push(text::caption("The bridge has no entertainment areas."));
+        } else {
+            let mut section = settings::section();
+            for e in &s.entertainment {
+                let active = e.status == "active";
+                let detail = format!(
+                    "{} {} · {}",
+                    e.lights,
+                    if e.lights == 1 { "light" } else { "lights" },
+                    if active { "Streaming" } else { "Not streaming" }
+                );
+                let mut row = widget::Row::new()
+                    .push(
+                        widget::Column::new()
+                            .push(text::body(e.name.clone()))
+                            .push(text::caption(detail))
+                            .width(Length::Fill),
+                    )
+                    .align_y(Alignment::Center);
+                if active {
+                    row = row.push(
+                        button::destructive("Stop")
+                            .on_press(Message::EntertainmentStop(e.id.clone())),
+                    );
+                }
+                section = section.add(row);
+            }
+            col = col.push(section);
+        }
+        col.into()
+    }
+
+    fn devices_view<'a>(&'a self, s: &'a Snapshot) -> Element<'a, Message> {
+        let space = theme::spacing();
+        let col = widget::Column::new()
+            .spacing(space.space_xs)
+            .padding([space.space_xs, space.space_s]);
+        if s.devices.is_empty() {
+            return col
+                .push(text::caption("The bridge reports no accessories."))
+                .into();
+        }
+        let mut section = settings::section();
+        for d in &s.devices {
+            let mut title = widget::Row::new()
+                .push(text::body(d.name.clone()).width(Length::Fill))
+                .spacing(space.space_xxs)
+                .align_y(Alignment::Center);
+            if let Some(b) = d.battery {
+                let name = match b as u32 {
+                    0..=10 => "battery-level-10-symbolic",
+                    11..=30 => "battery-level-30-symbolic",
+                    31..=60 => "battery-level-60-symbolic",
+                    61..=90 => "battery-level-90-symbolic",
+                    _ => "battery-level-100-symbolic",
+                };
+                title = title
+                    .push(icon::from_name(name).size(16))
+                    .push(text::caption(format!("{}%", b.round())));
+            }
+            let mut detail = vec![];
+            if d.bridge {
+                detail.push("Bridge".to_string());
+            }
+            if !d.product.is_empty() && d.product != d.name {
+                detail.push(d.product.clone());
+            }
+            if !d.software.is_empty() {
+                detail.push(format!("software {}", d.software));
+            }
+            let mut dc = widget::Column::new().spacing(space.space_xxxs).push(title);
+            if !detail.is_empty() {
+                dc = dc.push(text::caption(detail.join(" · ")));
+            }
+            if !d.reachable {
+                dc = dc.push(text::caption("Unreachable"));
+            }
+            match d.update.as_deref() {
+                None | Some("no_update") | Some("") => {}
+                Some(state) => {
+                    dc = dc.push(text::caption(format!(
+                        "Firmware update: {}",
+                        effect_label(state)
+                    )));
+                }
+            }
+            for r in &d.readings {
+                dc = dc.push(
+                    widget::Row::new()
+                        .push(text::caption(r.label.clone()).width(Length::Fill))
+                        .push(text::caption(r.value.clone())),
+                );
+            }
+            for c in &d.controls {
+                let (rtype, id) = (c.rtype.clone(), c.id.clone());
+                dc =
+                    dc.push(
+                        widget::Row::new()
+                            .push(text::caption(c.label.clone()).width(Length::Fill))
+                            .push(toggler(c.enabled).on_toggle(move |on| {
+                                Message::Enable(rtype.clone(), id.clone(), on)
+                            }))
+                            .align_y(Alignment::Center),
+                    );
+            }
+            section = section.add(dc);
+        }
+        col.push(section).into()
+    }
+
     fn group_view<'a>(&'a self, s: &'a Snapshot, g: &'a Group) -> Element<'a, Message> {
         let space = theme::spacing();
         let expanded = self.expanded.contains(&g.id);
@@ -527,6 +755,33 @@ impl HueApplet {
                     .column_spacing(space.space_xxs);
                 col = col.push(container(chips).padding([space.space_xxs, 0]));
             }
+            let mut routines: Vec<_> = g
+                .smart_scene_ids
+                .iter()
+                .filter_map(|id| s.smart_scenes.get(id))
+                .collect();
+            if !routines.is_empty() {
+                routines.sort_by_key(|r| r.name.to_lowercase());
+                let chips: Vec<Element<'a, Message>> = routines
+                    .into_iter()
+                    .map(|r| {
+                        tab_button(
+                            r.name.clone(),
+                            r.active,
+                            Message::SmartScene(r.id.clone(), !r.active),
+                        )
+                        .into()
+                    })
+                    .collect();
+                col = col.push(text::caption("Routines")).push(
+                    container(
+                        widget::flex_row(chips)
+                            .row_spacing(space.space_xxs)
+                            .column_spacing(space.space_xxs),
+                    )
+                    .padding([space.space_xxs, 0]),
+                );
+            }
             let mut lights = settings::section();
             for l in s.group_lights(g) {
                 let key = format!("l:{}", l.id);
@@ -581,7 +836,15 @@ impl HueApplet {
             .filter(|l| l.on)
             .collect();
         let ct: Vec<_> = lights.iter().filter(|l| l.ct).collect();
+        let single = match target {
+            Target::Light(id) => s.lights.get(id).filter(|l| l.on),
+            Target::Group(_) => None,
+        };
         TunerInfo {
+            effects: single.map(|l| l.effects.clone()).unwrap_or_default(),
+            effect: single.map(|l| l.effect.clone()).unwrap_or_default(),
+            timed: single.map(|l| l.timed_effects.clone()).unwrap_or_default(),
+            timed_effect: single.map(|l| l.timed_effect.clone()).unwrap_or_default(),
             color: lights.iter().any(|l| l.color),
             ct: !ct.is_empty(),
             mirek_min: ct
@@ -602,10 +865,25 @@ impl HueApplet {
         }
     }
 
-    /// The colour button of a light or room (None when nothing there can change colour).
+    /// The modes a colour control offers, in tab order.
+    fn tuner_modes(info: &TunerInfo) -> Vec<TunerMode> {
+        let mut modes = Vec::new();
+        if info.color {
+            modes.push(TunerMode::Colour);
+        }
+        if info.ct {
+            modes.push(TunerMode::White);
+        }
+        if !info.effects.is_empty() || !info.timed.is_empty() {
+            modes.push(TunerMode::Effects);
+        }
+        modes
+    }
+
+    /// The colour button of a light or room (None when nothing there can change).
     fn tuner_button<'a>(&self, s: &Snapshot, target: &Target) -> Option<Element<'a, Message>> {
         let info = self.tuner_info(s, target);
-        if !(info.color || info.ct) {
+        if Self::tuner_modes(&info).is_empty() {
             return None;
         }
         let open = self.tuner.as_ref() == Some(target);
@@ -613,7 +891,7 @@ impl HueApplet {
             .tooltip(if open {
                 "Hide colour"
             } else {
-                "Colour and white"
+                "Colour, white and effects"
             })
             .selected(open)
             .on_press(Message::ToggleTuner(target.clone()));
@@ -624,7 +902,13 @@ impl HueApplet {
         let space = theme::spacing();
         let info = self.tuner_info(s, target);
         let key = target.key();
-        let white = (self.tuner_white && info.ct) || !info.color;
+        let modes = Self::tuner_modes(&info);
+        let mode = if modes.contains(&self.tuner_mode) {
+            self.tuner_mode
+        } else {
+            modes.first().copied().unwrap_or_default()
+        };
+        let white = mode == TunerMode::White;
         let mut col = widget::Column::new().spacing(space.space_xxs).padding([
             space.space_xxs,
             0,
@@ -632,24 +916,59 @@ impl HueApplet {
             0,
         ]);
 
-        if info.color && info.ct {
-            let tab = |label: &'static str, active: bool, msg: Message| {
-                if active {
-                    button::suggested(label)
-                } else {
-                    button::standard(label)
-                }
-                .on_press(msg)
-            };
-            col = col.push(
-                widget::Row::new()
-                    .spacing(space.space_xxs)
-                    .push(tab("Colour", !white, Message::TunerWhite(false)))
-                    .push(tab("White", white, Message::TunerWhite(true))),
-            );
+        if modes.len() > 1 {
+            let mut tabs = widget::Row::new().spacing(space.space_xxs);
+            for m in &modes {
+                let label = match m {
+                    TunerMode::Colour => "Colour",
+                    TunerMode::White => "White",
+                    TunerMode::Effects => "Effects",
+                };
+                tabs = tabs.push(tab_button(label, *m == mode, Message::TunerMode(*m)));
+            }
+            col = col.push(tabs);
         }
 
-        if white {
+        if mode == TunerMode::Effects {
+            let Target::Light(light) = target else {
+                return col.into();
+            };
+            if !info.effects.is_empty() {
+                let chips: Vec<Element<'a, Message>> = std::iter::once("no_effect".to_string())
+                    .chain(info.effects.iter().cloned())
+                    .map(|e| {
+                        let active =
+                            e == info.effect || (e == "no_effect" && info.effect.is_empty());
+                        tab_button(effect_label(&e), active, Message::Effect(light.clone(), e))
+                            .into()
+                    })
+                    .collect();
+                col = col.push(
+                    widget::flex_row(chips)
+                        .row_spacing(space.space_xxs)
+                        .column_spacing(space.space_xxs),
+                );
+            }
+            if !info.timed.is_empty() {
+                let mut row = widget::Row::new().spacing(space.space_xxs);
+                for e in &info.timed {
+                    let active = *e == info.timed_effect;
+                    let target = if active {
+                        "no_effect".to_string()
+                    } else {
+                        e.clone()
+                    };
+                    row = row.push(tab_button(
+                        effect_label(e),
+                        active,
+                        Message::TimedEffect(light.clone(), target),
+                    ));
+                }
+                col = col
+                    .push(text::caption("Over 30 minutes (click again to stop):"))
+                    .push(row);
+            }
+        } else if white {
             let mut presets = widget::Row::new().spacing(space.space_xxs);
             for (label, m) in WHITE_PRESETS {
                 let m = m.clamp(info.mirek_min, info.mirek_max);
@@ -809,6 +1128,20 @@ impl HueApplet {
             .push(button::standard("Sync now").on_press(Message::WallpaperSync))
             .into()
     }
+}
+
+/// A button that shows as selected (suggested) or not (standard).
+fn tab_button<'a>(
+    label: impl Into<std::borrow::Cow<'a, str>>,
+    active: bool,
+    msg: Message,
+) -> button::TextButton<'a, Message> {
+    if active {
+        button::suggested(label)
+    } else {
+        button::standard(label)
+    }
+    .on_press(msg)
 }
 
 fn parse_hex(hex: &str) -> Option<Color> {
@@ -1004,14 +1337,92 @@ impl cosmic::Application for HueApplet {
                 if self.tuner.as_ref() == Some(&target) {
                     self.tuner = None;
                 } else {
-                    self.tuner_white = self.snapshot.as_ref().is_some_and(|s| {
-                        let info = self.tuner_info(s, &target);
-                        !info.color || (info.ct && info.mirek.is_some())
-                    });
+                    self.tuner_mode =
+                        match self.snapshot.as_ref().map(|s| self.tuner_info(s, &target)) {
+                            Some(info) if info.ct && (info.mirek.is_some() || !info.color) => {
+                                TunerMode::White
+                            }
+                            Some(info) if !info.color && !info.ct => TunerMode::Effects,
+                            _ => TunerMode::Colour,
+                        };
                     self.tuner = Some(target);
                 }
             }
-            Message::TunerWhite(white) => self.tuner_white = white,
+            Message::TunerMode(mode) => self.tuner_mode = mode,
+            Message::Tab(tab) => {
+                self.tab = tab;
+                self.tuner = None;
+            }
+            Message::Effect(id, effect) => {
+                if let Some(l) = self.snapshot.as_mut().and_then(|s| s.lights.get_mut(&id)) {
+                    l.effect = effect.clone();
+                }
+                self.send(
+                    "set",
+                    json!({"kind": "light", "ids": [id], "effect": effect}),
+                );
+            }
+            Message::TimedEffect(id, effect) => {
+                let light = self.snapshot.as_mut().and_then(|s| s.lights.get_mut(&id));
+                if effect == "no_effect" {
+                    // The bridge has no stop for a timed effect: any new state ends it, so the
+                    // current brightness is sent again (the light keeps its look).
+                    let pct = light.map(|l| {
+                        l.timed_effect = "no_effect".into();
+                        l.brightness
+                    });
+                    self.send(
+                        "set",
+                        json!({"kind": "light", "ids": [id], "pct": pct.unwrap_or(100.0).clamp(1.0, 100.0)}),
+                    );
+                } else {
+                    if let Some(l) = light {
+                        l.timed_effect = effect.clone();
+                    }
+                    self.send(
+                        "set",
+                        json!({"kind": "light", "ids": [id], "timed": {"effect": effect, "duration": TIMED_EFFECT_MS}}),
+                    );
+                }
+            }
+            Message::SmartScene(id, activate) => {
+                if let Some(r) = self
+                    .snapshot
+                    .as_mut()
+                    .and_then(|s| s.smart_scenes.get_mut(&id))
+                {
+                    r.active = activate;
+                }
+                let action = if activate { "activate" } else { "deactivate" };
+                self.send("smartScene", json!({"id": id, "action": action}));
+            }
+            Message::Automation(id, enabled) => {
+                if let Some(a) = self
+                    .snapshot
+                    .as_mut()
+                    .and_then(|s| s.automations.iter_mut().find(|a| a.id == id))
+                {
+                    a.enabled = enabled;
+                }
+                self.send("automation", json!({"id": id, "enabled": enabled}));
+            }
+            Message::EntertainmentStop(id) => {
+                self.send("entertainment.stop", json!({"id": id}));
+            }
+            Message::Enable(rtype, id, enabled) => {
+                if let Some(c) = self.snapshot.as_mut().and_then(|s| {
+                    s.devices
+                        .iter_mut()
+                        .flat_map(|d| d.controls.iter_mut())
+                        .find(|c| c.id == id)
+                }) {
+                    c.enabled = enabled;
+                }
+                self.send(
+                    "enable",
+                    json!({"rtype": rtype, "id": id, "enabled": enabled}),
+                );
+            }
             Message::Hue(t, v) => {
                 self.drag.insert(format!("h:{}", t.key()), v);
             }

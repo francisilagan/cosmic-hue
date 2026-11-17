@@ -14,6 +14,89 @@ pub struct Snapshot {
     pub groups: Vec<Group>,
     pub lights: HashMap<String, Light>,
     pub scenes: HashMap<String, Scene>,
+    #[serde(rename = "smartScenes")]
+    pub smart_scenes: HashMap<String, SmartScene>,
+    pub automations: Vec<Automation>,
+    pub devices: Vec<Device>,
+    pub entertainment: Vec<Entertainment>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SmartScene {
+    pub id: String,
+    pub name: String,
+    pub group: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Automation {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub status: String,
+    pub script: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Entertainment {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub lights: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Reading {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Control {
+    pub rtype: String,
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    pub product: String,
+    pub software: String,
+    pub bridge: bool,
+    pub reachable: bool,
+    pub battery: Option<f32>,
+    pub update: Option<String>,
+    #[serde(deserialize_with = "readings")]
+    pub readings: Vec<Reading>,
+    pub controls: Vec<Control>,
+}
+
+/// Readings whose value may be a string or a number in the snapshot.
+fn readings<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Reading>, D::Error> {
+    let raw: Vec<serde_json::Value> = Vec::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| {
+            let label = v.get("label")?.as_str()?.to_string();
+            let value = match v.get("value")? {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            Some(Reading { label, value })
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -36,6 +119,8 @@ pub struct Group {
     pub light_ids: Vec<String>,
     #[serde(rename = "sceneIds")]
     pub scene_ids: Vec<String>,
+    #[serde(rename = "smartSceneIds")]
+    pub smart_scene_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +140,12 @@ pub struct Light {
     pub mirek_min: f32,
     #[serde(rename = "mirekMax")]
     pub mirek_max: f32,
+    pub effects: Vec<String>,
+    pub effect: String,
+    #[serde(rename = "timedEffects")]
+    pub timed_effects: Vec<String>,
+    #[serde(rename = "timedEffect")]
+    pub timed_effect: String,
 }
 
 impl Default for Light {
@@ -72,6 +163,10 @@ impl Default for Light {
             mirek: None,
             mirek_min: 153.0,
             mirek_max: 500.0,
+            effects: Vec::new(),
+            effect: "no_effect".into(),
+            timed_effects: Vec::new(),
+            timed_effect: "no_effect".into(),
         }
     }
 }
@@ -284,6 +379,33 @@ mod tests {
             "a light that is off is left alone"
         );
         assert_eq!(s.lights_of("home").len(), 2);
+    }
+
+    #[test]
+    fn the_other_sections_parse() {
+        let s: Snapshot = serde_json::from_value(serde_json::json!({
+            "lights": {"l": {"id": "l", "effects": ["candle"], "effect": "candle",
+                             "timedEffects": ["sunrise"], "timedEffect": "no_effect"}},
+            "smartScenes": {"x": {"id": "x", "name": "Natural light", "group": "r", "active": true}},
+            "automations": [{"id": "a", "name": "Evening", "enabled": true, "status": "running", "script": "Schedule"}],
+            "entertainment": [{"id": "e", "name": "TV area", "status": "active", "type": "screen", "lights": 2}],
+            "devices": [{"id": "d", "name": "Motion", "product": "Hue motion sensor", "reachable": true,
+                         "battery": 87, "update": "ready",
+                         "readings": [{"label": "Temperature", "value": "21.5 °C"}, {"label": "Lux", "value": 120},
+                                      {"bad": 1}],
+                         "controls": [{"rtype": "motion", "id": "m", "label": "Motion", "enabled": false}]}]
+        }))
+        .unwrap();
+        assert_eq!(s.lights["l"].effect, "candle");
+        assert_eq!(s.lights["l"].timed_effects, ["sunrise"]);
+        assert!(s.smart_scenes["x"].active);
+        assert_eq!(s.automations[0].script, "Schedule");
+        assert_eq!(s.entertainment[0].kind, "screen");
+        let d = &s.devices[0];
+        assert_eq!(d.battery, Some(87.0));
+        assert_eq!(d.readings.len(), 2, "a reading without a label is dropped");
+        assert_eq!(d.readings[1].value, "120", "a number value becomes text");
+        assert_eq!(d.controls[0].rtype, "motion");
     }
 
     #[test]

@@ -11,6 +11,10 @@ The applet is written in Rust with `libcosmic`, the official COSMIC toolkit. A s
 - Scenes: open a room and click a scene to recall it. The active scene is highlighted.
 - Colour and white: click the colour button of a room or a light. Pick a colour preset, or set the hue and saturation. On the White tab, pick a white preset or set the colour temperature from cool to warm.
 - All lights: the switch at the top turns every light on or off.
+- Effects: in the colour control of a light, the Effects tab starts an effect (for example candle, fire, or prism). It also starts a 30-minute sunrise or sunset.
+- Routines: open a room and click a routine (smart scene) to start or stop it.
+- Automations tab: turn the automations of the bridge on or off. Stop an entertainment area that is streaming.
+- Devices tab: see the accessories and the bridge, with battery, firmware update state, and sensor readings. Turn sensors such as motion sensing on or off.
 - Wallpaper sync: the backend sets the colour of your lights from the current COSMIC wallpaper.
 - Live updates: changes from the Hue app or from switches show in the applet.
 
@@ -88,8 +92,7 @@ This runs the Python backend tests and the Rust tests.
 
 These features of omarchy-hue are not in the COSMIC applet yet:
 
-- Effects, routines (smart scenes), automations, entertainment areas, and the devices view.
-- Scene and zone editing, renaming.
+- Scene and zone editing, renaming, and the power-up behaviour of a light.
 - Translations.
 
 The backend already supports all of them. Only the applet views are missing.
