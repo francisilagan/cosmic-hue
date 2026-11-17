@@ -49,6 +49,12 @@ pub struct Light {
     pub reachable: bool,
     pub color: bool,
     pub hex: Option<String>,
+    pub ct: bool,
+    pub mirek: Option<f32>,
+    #[serde(rename = "mirekMin")]
+    pub mirek_min: f32,
+    #[serde(rename = "mirekMax")]
+    pub mirek_max: f32,
 }
 
 impl Default for Light {
@@ -62,6 +68,10 @@ impl Default for Light {
             reachable: true,
             color: false,
             hex: None,
+            ct: false,
+            mirek: None,
+            mirek_min: 153.0,
+            mirek_max: 500.0,
         }
     }
 }
@@ -124,9 +134,9 @@ impl Snapshot {
         groups
     }
 
-    /// Set the power of every light of a group (used before the bridge echoes a change).
-    pub fn assume_group_on(&mut self, grouped_light: &str, on: bool) {
-        let ids: Vec<String> = if self.home_group.as_deref() == Some(grouped_light) {
+    /// The ids of the lights a grouped_light controls (every light for the home group).
+    pub fn lights_of(&self, grouped_light: &str) -> Vec<String> {
+        if self.home_group.as_deref() == Some(grouped_light) {
             self.lights.keys().cloned().collect()
         } else {
             self.groups
@@ -134,7 +144,33 @@ impl Snapshot {
                 .filter(|g| g.group == grouped_light)
                 .flat_map(|g| g.light_ids.clone())
                 .collect()
-        };
+        }
+    }
+
+    /// Show a colour (`hex`) or a white (`mirek`) on lights that are on and can show it,
+    /// before the bridge echoes the change.
+    pub fn assume_colour(&mut self, ids: &[String], hex: Option<&str>, mirek: Option<f32>) {
+        for id in ids {
+            let Some(l) = self.lights.get_mut(id) else {
+                continue;
+            };
+            if !l.on {
+                continue;
+            }
+            if let (Some(hex), true) = (hex, l.color) {
+                l.hex = Some(hex.to_string());
+                l.mirek = None;
+            } else if let (Some(m), true) = (mirek, l.ct) {
+                let m = m.clamp(l.mirek_min, l.mirek_max);
+                l.mirek = Some(m);
+                l.hex = Some(crate::colour::mirek_to_hex(m));
+            }
+        }
+    }
+
+    /// Set the power of every light of a group (used before the bridge echoes a change).
+    pub fn assume_group_on(&mut self, grouped_light: &str, on: bool) {
+        let ids = self.lights_of(grouped_light);
         for id in &ids {
             if let Some(l) = self.lights.get_mut(id) {
                 l.on = on;
@@ -218,6 +254,36 @@ mod tests {
         s.assume_group_on("home", false);
         assert!(!s.any_on());
         assert!(s.groups.iter().all(|g| !g.on));
+    }
+
+    #[test]
+    fn assumed_colour_respects_power_and_capabilities() {
+        let mut s = fixture();
+        s.lights.get_mut("l2").unwrap().on = true;
+        s.lights.get_mut("l2").unwrap().color = true;
+        s.lights.get_mut("l1").unwrap().ct = true;
+        let ids = s.lights_of("gr");
+        s.assume_colour(&ids, Some("#00ff00"), None);
+        assert_eq!(s.lights["l2"].hex.as_deref(), Some("#00ff00"));
+        assert_eq!(
+            s.lights["l1"].hex, None,
+            "a white-only light keeps its look"
+        );
+        s.assume_colour(&ids, None, Some(900.0));
+        assert_eq!(
+            s.lights["l1"].mirek,
+            Some(500.0),
+            "clamped to the range of the light"
+        );
+        assert!(s.lights["l1"].hex.is_some());
+        s.lights.get_mut("l1").unwrap().on = false;
+        s.assume_colour(&["l1".to_string()], None, Some(200.0));
+        assert_eq!(
+            s.lights["l1"].mirek,
+            Some(500.0),
+            "a light that is off is left alone"
+        );
+        assert_eq!(s.lights_of("home").len(), 2);
     }
 
     #[test]

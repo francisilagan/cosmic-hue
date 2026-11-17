@@ -13,10 +13,60 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::backend;
+use crate::colour;
 use crate::model::{Group, Snapshot, Wallpaper};
 
 pub const APP_ID: &str = "io.github.francisilagan.CosmicHue";
 const BULB_ICON: &[u8] = include_bytes!("../res/icons/cosmic-hue-symbolic.svg");
+
+/// What a colour control acts on: a light id, or a grouped_light id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Light(String),
+    Group(String),
+}
+
+impl Target {
+    fn key(&self) -> String {
+        match self {
+            Target::Light(id) => format!("l:{id}"),
+            Target::Group(id) => format!("g:{id}"),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Target::Light(_) => "light",
+            Target::Group(_) => "group",
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Target::Light(id) | Target::Group(id) => id,
+        }
+    }
+}
+
+/// What the colour control of a target can do, and what it shows now.
+struct TunerInfo {
+    color: bool,
+    ct: bool,
+    mirek_min: f32,
+    mirek_max: f32,
+    hex: Option<String>,
+    mirek: Option<f32>,
+}
+
+/// Hues (degrees) of the colour presets.
+const PRESET_HUES: [f32; 9] = [0.0, 25.0, 45.0, 60.0, 120.0, 180.0, 220.0, 270.0, 320.0];
+/// White presets: (label, mirek).
+const WHITE_PRESETS: [(&str, f32); 4] = [
+    ("Warm", 454.0),
+    ("Soft", 370.0),
+    ("Neutral", 250.0),
+    ("Cool", 153.0),
+];
 
 #[derive(Default)]
 pub struct HueApplet {
@@ -39,6 +89,9 @@ pub struct HueApplet {
     pair_cmd: Option<u64>,
     discovered: Vec<String>,
     notice: Option<String>,
+    /// The open colour control (one at a time) and whether it shows whites.
+    tuner: Option<Target>,
+    tuner_white: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +120,15 @@ pub enum Message {
     WallpaperTurnOn(bool),
     WallpaperSync,
     DismissNotice,
+    ToggleTuner(Target),
+    TunerWhite(bool),
+    Hue(Target, f32),
+    Saturation(Target, f32),
+    ColourDone(Target),
+    Mirek(Target, f32),
+    MirekDone(Target),
+    SetHex(Target, String),
+    SetMirek(Target, f32),
 }
 
 impl HueApplet {
@@ -417,7 +479,12 @@ impl HueApplet {
                 .on_press(Message::Expand(g.id.clone()))
                 .width(Length::Fill),
             )
+            .push_maybe(
+                g.on.then(|| self.tuner_button(s, &Target::Group(g.group.clone())))
+                    .flatten(),
+            )
             .push(toggler(g.on).on_toggle(move |on| Message::GroupOn(gl.clone(), on)))
+            .spacing(space.space_xxs)
             .align_y(Alignment::Center);
 
         let mut col = widget::Column::new()
@@ -430,6 +497,10 @@ impl HueApplet {
                 })
                 .on_release(Message::GroupBrightnessDone(gl3)),
             );
+            let target = Target::Group(g.group.clone());
+            if self.tuner.as_ref() == Some(&target) {
+                col = col.push(self.tuner_view(s, &target));
+            }
         }
         if expanded {
             let scenes: Vec<_> = g
@@ -462,7 +533,8 @@ impl HueApplet {
                 let id1 = l.id.clone();
                 let id2 = l.id.clone();
                 let id3 = l.id.clone();
-                let swatch = swatch(l.hex.as_deref().filter(|_| l.on && l.color), 12.0);
+                let swatch = swatch(l.hex.as_deref().filter(|_| l.on), 12.0);
+                let target = Target::Light(l.id.clone());
                 let mut name_row = widget::Row::new()
                     .push(swatch)
                     .push(text::body(l.name.clone()).width(Length::Fill))
@@ -470,6 +542,9 @@ impl HueApplet {
                     .align_y(Alignment::Center);
                 if !l.reachable {
                     name_row = name_row.push(text::caption("unreachable"));
+                }
+                if l.on {
+                    name_row = name_row.push_maybe(self.tuner_button(s, &target));
                 }
                 name_row = name_row
                     .push(toggler(l.on).on_toggle(move |on| Message::LightOn(id1.clone(), on)));
@@ -485,11 +560,219 @@ impl HueApplet {
                         .on_release(Message::LightBrightnessDone(id3)),
                     );
                 }
+                if l.on && self.tuner.as_ref() == Some(&target) {
+                    lc = lc.push(self.tuner_view(s, &target));
+                }
                 lights = lights.add(lc);
             }
             col = col.push(lights);
         }
         col.into()
+    }
+
+    fn tuner_info(&self, s: &Snapshot, target: &Target) -> TunerInfo {
+        let ids = match target {
+            Target::Light(id) => vec![id.clone()],
+            Target::Group(gl) => s.lights_of(gl),
+        };
+        let lights: Vec<_> = ids
+            .iter()
+            .filter_map(|id| s.lights.get(id))
+            .filter(|l| l.on)
+            .collect();
+        let ct: Vec<_> = lights.iter().filter(|l| l.ct).collect();
+        TunerInfo {
+            color: lights.iter().any(|l| l.color),
+            ct: !ct.is_empty(),
+            mirek_min: ct
+                .iter()
+                .map(|l| l.mirek_min)
+                .fold(f32::INFINITY, f32::min)
+                .min(500.0),
+            mirek_max: ct
+                .iter()
+                .map(|l| l.mirek_max)
+                .fold(0.0, f32::max)
+                .max(153.0),
+            hex: lights
+                .iter()
+                .find(|l| l.color && l.mirek.is_none())
+                .and_then(|l| l.hex.clone()),
+            mirek: ct.iter().find_map(|l| l.mirek),
+        }
+    }
+
+    /// The colour button of a light or room (None when nothing there can change colour).
+    fn tuner_button<'a>(&self, s: &Snapshot, target: &Target) -> Option<Element<'a, Message>> {
+        let info = self.tuner_info(s, target);
+        if !(info.color || info.ct) {
+            return None;
+        }
+        let open = self.tuner.as_ref() == Some(target);
+        let b = button::icon(icon::from_name("color-select-symbolic"))
+            .tooltip(if open {
+                "Hide colour"
+            } else {
+                "Colour and white"
+            })
+            .selected(open)
+            .on_press(Message::ToggleTuner(target.clone()));
+        Some(b.into())
+    }
+
+    fn tuner_view<'a>(&'a self, s: &'a Snapshot, target: &Target) -> Element<'a, Message> {
+        let space = theme::spacing();
+        let info = self.tuner_info(s, target);
+        let key = target.key();
+        let white = (self.tuner_white && info.ct) || !info.color;
+        let mut col = widget::Column::new().spacing(space.space_xxs).padding([
+            space.space_xxs,
+            0,
+            space.space_xs,
+            0,
+        ]);
+
+        if info.color && info.ct {
+            let tab = |label: &'static str, active: bool, msg: Message| {
+                if active {
+                    button::suggested(label)
+                } else {
+                    button::standard(label)
+                }
+                .on_press(msg)
+            };
+            col = col.push(
+                widget::Row::new()
+                    .spacing(space.space_xxs)
+                    .push(tab("Colour", !white, Message::TunerWhite(false)))
+                    .push(tab("White", white, Message::TunerWhite(true))),
+            );
+        }
+
+        if white {
+            let mut presets = widget::Row::new().spacing(space.space_xxs);
+            for (label, m) in WHITE_PRESETS {
+                let m = m.clamp(info.mirek_min, info.mirek_max);
+                presets = presets.push(
+                    button::custom(
+                        widget::Row::new()
+                            .push(swatch(Some(&colour::mirek_to_hex(m)), 12.0))
+                            .push(text::caption(label))
+                            .spacing(space.space_xxxs)
+                            .align_y(Alignment::Center),
+                    )
+                    .class(theme::Button::Standard)
+                    .on_press(Message::SetMirek(target.clone(), m)),
+                );
+            }
+            let m = self
+                .drag
+                .get(&format!("m:{key}"))
+                .copied()
+                .or(info.mirek)
+                .unwrap_or((info.mirek_min + info.mirek_max) / 2.0)
+                .clamp(info.mirek_min, info.mirek_max);
+            let (t1, t2) = (target.clone(), target.clone());
+            col = col
+                .push(presets)
+                .push(
+                    widget::Row::new()
+                        .push(text::caption("Cool"))
+                        .push(
+                            widget::slider(info.mirek_min..=info.mirek_max, m, move |v| {
+                                Message::Mirek(t1.clone(), v)
+                            })
+                            .on_release(Message::MirekDone(t2))
+                            .width(Length::Fill),
+                        )
+                        .push(text::caption("Warm"))
+                        .spacing(space.space_xs)
+                        .align_y(Alignment::Center),
+                )
+                .push(
+                    widget::Row::new()
+                        .push(swatch(Some(&colour::mirek_to_hex(m)), 14.0))
+                        .push(text::caption(format!("{} K", colour::kelvin(m))))
+                        .spacing(space.space_xxs)
+                        .align_y(Alignment::Center),
+                );
+        } else {
+            let (h0, s0) = info
+                .hex
+                .as_deref()
+                .and_then(colour::hex_to_hs)
+                .unwrap_or((30.0, 80.0));
+            let hue = self.drag.get(&format!("h:{key}")).copied().unwrap_or(h0);
+            let sat = self.drag.get(&format!("s:{key}")).copied().unwrap_or(s0);
+            let mut presets = widget::Row::new().spacing(space.space_xxs);
+            for h in PRESET_HUES {
+                let hex = colour::hs_to_hex(h, 100.0);
+                presets = presets.push(
+                    button::custom(swatch(Some(&hex), 22.0))
+                        .padding(2)
+                        .class(theme::Button::Text)
+                        .on_press(Message::SetHex(target.clone(), hex)),
+                );
+            }
+            let (t1, t2, t3, t4) = (
+                target.clone(),
+                target.clone(),
+                target.clone(),
+                target.clone(),
+            );
+            col = col
+                .push(presets)
+                .push(
+                    widget::Row::new()
+                        .push(text::caption("Hue").width(Length::Fixed(72.0)))
+                        .push(
+                            widget::slider(0.0..=359.0, hue, move |v| Message::Hue(t1.clone(), v))
+                                .on_release(Message::ColourDone(t2))
+                                .width(Length::Fill),
+                        )
+                        .spacing(space.space_xs)
+                        .align_y(Alignment::Center),
+                )
+                .push(
+                    widget::Row::new()
+                        .push(text::caption("Saturation").width(Length::Fixed(72.0)))
+                        .push(
+                            widget::slider(0.0..=100.0, sat, move |v| {
+                                Message::Saturation(t3.clone(), v)
+                            })
+                            .on_release(Message::ColourDone(t4))
+                            .width(Length::Fill),
+                        )
+                        .spacing(space.space_xs)
+                        .align_y(Alignment::Center),
+                )
+                .push(
+                    widget::Row::new()
+                        .push(swatch(Some(&colour::hs_to_hex(hue, sat)), 14.0))
+                        .push(text::caption(colour::hs_to_hex(hue, sat)))
+                        .spacing(space.space_xxs)
+                        .align_y(Alignment::Center),
+                );
+        }
+        col.into()
+    }
+
+    /// Send a colour or a white to a target, and show it at once.
+    fn set_colour(&mut self, target: &Target, hex: Option<String>, mirek: Option<f32>) {
+        if let Some(s) = &mut self.snapshot {
+            let ids = match target {
+                Target::Light(id) => vec![id.clone()],
+                Target::Group(gl) => s.lights_of(gl),
+            };
+            s.assume_colour(&ids, hex.as_deref(), mirek);
+        }
+        let mut cmd = json!({"kind": target.kind(), "ids": [target.id()]});
+        if let Some(hex) = hex {
+            cmd["hex"] = json!(hex);
+        } else if let Some(m) = mirek {
+            cmd["mirek"] = json!(m.round() as i64);
+        }
+        self.send("set", cmd);
     }
 
     fn wallpaper_view(&self) -> Element<'_, Message> {
@@ -717,6 +1000,54 @@ impl cosmic::Application for HueApplet {
                 self.send("wallpaper.sync", json!({}));
             }
             Message::DismissNotice => self.notice = None,
+            Message::ToggleTuner(target) => {
+                if self.tuner.as_ref() == Some(&target) {
+                    self.tuner = None;
+                } else {
+                    self.tuner_white = self.snapshot.as_ref().is_some_and(|s| {
+                        let info = self.tuner_info(s, &target);
+                        !info.color || (info.ct && info.mirek.is_some())
+                    });
+                    self.tuner = Some(target);
+                }
+            }
+            Message::TunerWhite(white) => self.tuner_white = white,
+            Message::Hue(t, v) => {
+                self.drag.insert(format!("h:{}", t.key()), v);
+            }
+            Message::Saturation(t, v) => {
+                self.drag.insert(format!("s:{}", t.key()), v);
+            }
+            Message::ColourDone(t) => {
+                let key = t.key();
+                let info = self.snapshot.as_ref().map(|s| self.tuner_info(s, &t));
+                let (h0, s0) = info
+                    .and_then(|i| i.hex)
+                    .as_deref()
+                    .and_then(colour::hex_to_hs)
+                    .unwrap_or((30.0, 80.0));
+                let hue = self.drag.remove(&format!("h:{key}")).unwrap_or(h0);
+                let sat = self.drag.remove(&format!("s:{key}")).unwrap_or(s0);
+                self.set_colour(&t, Some(colour::hs_to_hex(hue, sat)), None);
+            }
+            Message::Mirek(t, v) => {
+                self.drag.insert(format!("m:{}", t.key()), v);
+            }
+            Message::MirekDone(t) => {
+                if let Some(m) = self.drag.remove(&format!("m:{}", t.key())) {
+                    self.set_colour(&t, None, Some(m));
+                }
+            }
+            Message::SetHex(t, hex) => {
+                let key = t.key();
+                self.drag.remove(&format!("h:{key}"));
+                self.drag.remove(&format!("s:{key}"));
+                self.set_colour(&t, Some(hex), None);
+            }
+            Message::SetMirek(t, m) => {
+                self.drag.remove(&format!("m:{}", t.key()));
+                self.set_colour(&t, None, Some(m));
+            }
         }
         Task::none()
     }
